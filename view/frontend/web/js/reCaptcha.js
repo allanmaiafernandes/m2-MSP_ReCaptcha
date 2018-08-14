@@ -22,14 +22,55 @@ define(
         'uiComponent',
         'jquery',
         'ko',
-        'MSP_ReCaptcha/js/registry',
-        'https://www.google.com/recaptcha/api.js'
+        'MSP_ReCaptcha/js/registry'
     ],
-    function (Component, $, ko, registry) {
+    function (Component, $, ko, registry, undefined) {
 
         return Component.extend({
             defaults: {
                 template: 'MSP_ReCaptcha/reCaptcha'
+            },
+
+            _isApiRegistered: undefined,
+            captchaIndex: 0,
+
+            initialize: function () {
+                this._super();
+                this._loadApi();
+            },
+
+            /**
+             * Loads recaptchaapi API and triggers event, when loaded
+             * @private
+             */
+            _loadApi: function () {
+                var element, scriptTag;
+
+                if (this._isApiRegistered !== undefined) {
+                    if (this._isApiRegistered === true) {
+                        $(window).trigger('recaptchaapiready');
+                    }
+
+                    return;
+                }
+                this._isApiRegistered = false;
+
+                // global function
+                window.globalOnRecaptchaOnLoadCallback = function() {
+                    this._isApiRegistered = true;
+                    $(window).trigger('recaptchaapiready');
+                }.bind(this);
+
+                element   = document.createElement('script');
+                scriptTag = document.getElementsByTagName('script')[0];
+
+                element.async = true;
+                element.src = 'https://www.google.com/recaptcha/api.js'
+                    + '?onload=globalOnRecaptchaOnLoadCallback&render=explicit'
+                    + (this.settings.lang ? '&hl=' + this.settings.lang : '');
+
+                scriptTag.parentNode.insertBefore(element, scriptTag);
+
             },
 
             /**
@@ -44,66 +85,50 @@ define(
              * Recaptcha callback
              * @param {String} token
              */
-            reCaptchaCallback: function (token) {
+            reCaptchaCallback: function (token, captchaId) {
+                var $parentForm,
+                    $reCaptcha,
+                    $tokenField;
+
+                $reCaptcha = $('#' + captchaId);
+                $parentForm = $reCaptcha.parents('form');
+                $tokenField = $parentForm.find('input[name=token]');
+
                 if (this.settings.size === 'invisible') {
-                    this.tokenField.value = token;
-                    this.$parentForm.submit();
+                    $tokenField.val(token);
+                    $parentForm.submit();
                 }
             },
 
-            /**
-             * Initialize reCaptcha after first rendering
-             */
-            initCaptcha: function () {
+            initializeCaptcha: function(element) {
                 var me = this,
                     $parentForm,
                     $wrapper,
                     $reCaptcha,
                     widgetId,
                     listeners,
-                    renderOptions;
+                    captchaId = (this.getReCaptchaId() + '-' + this.captchaIndex++);
 
-                if (this.captchaInitialized) {
-                    return;
-                }
-
-                this.captchaInitialized = true;
-
-                /*
-                 * Workaround for data-bind issue:
-                 * We cannot use data-bind to link a dynamic id to our component
-                 * See: https://stackoverflow.com/questions/46657573/recaptcha-the-bind-parameter-must-be-an-element-or-id
-                 *
-                 * We create a wrapper element with a wrapping id and we inject the real ID with jQuery.
-                 * In this way we have no data-bind attribute at all in our reCaptcha div
-                 */
-                $wrapper = $('#' + this.getReCaptchaId() + '-wrapper');
+                $wrapper = element;
                 $reCaptcha = $wrapper.find('.g-recaptcha');
-                $reCaptcha.attr('id', this.getReCaptchaId());
+                $reCaptcha.attr('id', captchaId);
 
                 $parentForm = $wrapper.parents('form');
-                me = this;
 
-                renderOptions = {
+                // eslint-disable-next-line no-undef
+                widgetId = grecaptcha.render(captchaId, {
                     'sitekey': this.settings.siteKey,
                     'theme': this.settings.theme,
                     'size': this.settings.size,
                     'badge': this.badge ? this.badge : this.settings.badge,
                     'callback': function (token) { // jscs:ignore jsDoc
-                        me.reCaptchaCallback(token);
+                        me.reCaptchaCallback(token, captchaId);
                     }
-                };
-
-                if (this.settings.lang) {
-                    renderOptions['hl'] = this.settings.lang;
-                }
-
-                // eslint-disable-next-line no-undef
-                widgetId = grecaptcha.render(this.getReCaptchaId(), renderOptions);
+                });
 
                 if (this.settings.size === 'invisible') {
                     $parentForm.submit(function (event) {
-                        if (!me.tokenField.value) {
+                        if (!$(this).find('input[name=token]').val()) {
                             // eslint-disable-next-line no-undef
                             grecaptcha.execute(widgetId);
                             event.preventDefault(event);
@@ -116,17 +141,37 @@ define(
                     listeners.unshift(listeners.pop());
 
                     // Create a virtual token field
-                    this.tokenField = $('<input type="text" name="token" style="display: none" />')[0];
-                    this.$parentForm = $parentForm;
-                    $parentForm.append(this.tokenField);
+                    var tokenField = $('<input type="text" name="token" style="display: none" />')[0];
+                    $parentForm.append(tokenField);
                 } else {
-                    this.tokenField = null;
+                    tokenField = null;
                 }
 
-                registry.ids.push(this.getReCaptchaId());
+                registry.ids.push(captchaId);
                 registry.captchaList.push(widgetId);
-                registry.tokenFields.push(this.tokenField);
+                registry.tokenFields.push(tokenField);
+            },
 
+            /**
+             * Initialize reCaptcha after first rendering
+             */
+            initCaptcha: function () {
+                var me = this,
+                    $parentForm,
+                    $wrapper,
+                    $reCaptcha,
+                    widgetId,
+                    listeners;
+
+                if (this.captchaInitialized) {
+                    return;
+                }
+
+                this.captchaInitialized = true;
+
+                $('.msp-recaptcha-wrapper').each(function() {
+                    me.initializeCaptcha($(this));
+                });
             },
 
             /**
@@ -137,7 +182,7 @@ define(
 
                 if (this.getIsVisible()) {
                     var initCaptchaInterval = setInterval(function () {
-                        if (window.grecaptcha) {
+                        if (window.grecaptcha && typeof window.grecaptcha.render == 'function') {
                             clearInterval(initCaptchaInterval);
                             me.initCaptcha();
                         }
